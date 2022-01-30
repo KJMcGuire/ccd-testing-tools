@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 ######################################################
 ##Author:  Kellie McGuire     kellie@kelliejensen.com
 ##
@@ -16,6 +18,7 @@ import sys
 import matplotlib.pyplot as plt
 import time
 import datetime
+import numpy.ma as ma
 
 
 ###Create array of the data from FITS file
@@ -45,36 +48,14 @@ def flatten_files(fitsfiles):
 def median_imgs(flatfiles, width, height):
     n_files, file_length = flatfiles.shape
 
-
-    median_img = np.zeros(file_length)
-    median_sans_outliers = np.zeros(file_length)
-    for cell in range(file_length):
-
-
-        cells = flatfiles[:,cell:cell+1]   ###cells is a slice of the n_files pixel at index cell
-
-        median = np.median(cells)
-        stddev = np.std(cells)
-        filter_cells = []
-
-        ###remove outliers from cells
-        for element in cells:
-            if element > median-stddev:
-                if element < median+stddev:
-                    filter_cells.append(True)
-                else: filter_cells.append(False)
-            else:
-                filter_cells.append(False)
-        cells_filtered = cells[filter_cells]
-
-        ###fill arrays
-        median_img[cell] = median
-        median_sans_outliers[cell] = np.median(cells_filtered)
-
-        print("{} of {}".format(cell,file_length))
+    median_img = np.median(flatfiles, axis=0)
+    stddev = np.std(flatfiles,axis=0)
+    masked = np.ma.masked_where(np.logical_or(flatfiles<median_img-stddev,flatfiles>median_img+stddev),flatfiles,copy=True)
+    median_sans_outliers = np.ma.median(masked, axis=0)
 
     median_img = median_img.reshape(width, height)
     median_sans_outliers = median_sans_outliers.reshape(width, height)
+    
     np.savetxt('median_img.txt', median_img, delimiter=',')
     np.savetxt('median_sans_outliers.txt', median_sans_outliers, delimiter=',')
     return
