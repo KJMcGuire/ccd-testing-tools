@@ -76,7 +76,7 @@ def stack_imgs(fitsfiles, n_amps):
 
 
 ###Calculate 1-D projections (median, med_over_sum, MAD)
-def projection_x(stacked, sums, gain):
+def projection_x(stacked, sums, gain, min_col):
 
     calibrated = stacked / gain
 
@@ -88,12 +88,12 @@ def projection_x(stacked, sums, gain):
                        np.median(calibrated), np.std(calibrated))
     ###med1 is a simle median over all pixels in col over all imgs
     med1 = np.median(calibrated, axis = 1)
-    median = NamedArray("median", med1, np.median(med1), np.std(med1))
+    median = NamedArray("median", med1, np.median(med1[min_col:-1]), np.std(med1[min_col:-1]))
     mad = stats.median_abs_deviation(calibrated, axis = 1)
-    MAD = NamedArray("MAD", mad, np.median(mad), np.std(mad))
+    MAD = NamedArray("MAD", mad, np.median(mad[min_col:-1]), np.std(mad[min_col:-1]))
     ###med2 takes the sum of electrons in col per image and then takes median
     med2 = np.median(sums, axis = 0)
-    med_over_sum = NamedArray("median", med2, np.median(med2), np.std(med2))
+    med_over_sum = NamedArray("median", med2, np.median(med2[min_col:-1]), np.std(med2[min_col:-1]))
 
 
     return (pix_vals, median, MAD, med_over_sum)
@@ -128,9 +128,8 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
     Fit parameters:
     [0]  Norm (number of counts)
     [1]  lambda of poisson
-    [2]  scaling factor
+    [2]  gauss mean offset
     [3]  pix noise (sigma of gauss)
-    [4]  gauss mean offset
 
 
     """
@@ -138,13 +137,13 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
     #func = ROOT.TF1("func", "[0]*TMath::Poisson(x*[2],[1])", -10, 100)
     func = []
 
-    for i in range(4):
-        func.append("[0]*TMath::Poisson({0}*[2],[1])*TMath::Gaus(x,{0}+[4],[3],1)".format(i))
+    for i in range(3):
+        func.append("[0]*TMath::Poisson({0},[1])*TMath::Gaus(x,{0}+[2],[3],1)".format(i))
 
     f = ROOT.TF1("poiss_gauss", " + ".join(func))
 
-    f.SetParNames("norm","#lambda","scale","#sigma","#mu")
-    f.SetParameters(norm, lam, 1., noise, mean)
+    f.SetParNames("norm","#lambda","#mu","#sigma")
+    f.SetParameters(norm, lam, mean, noise)
 
     hist.GetXaxis().SetTitle("{} (e)".format(data.name))
     hist.GetYaxis().SetTitle("Count")
@@ -171,12 +170,21 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
 ###Generate mask
 def make_mask(mad, med1, med2, strength):
 
-    med_mask = np.ma.masked_where(np.logical_or(med1.data > med1.median + med1.std*strength,
-                            med1.data < med1.median - med1.std*strength), med1.data, copy=False)
+
+    # med_mask = np.ma.masked_where(np.logical_or(med1.data > med1.median + med1.std*strength,
+    #                         med1.data < med1.median - med1.std*strength), med1.data, copy=False)
     MAD_mask = np.ma.masked_where(np.logical_or(mad.data > mad.median + mad.std*strength,
                             mad.data < mad.median - mad.std*strength), mad.data, copy=False)
     med_mask = np.ma.masked_where(np.logical_or(med2.data > med2.median + med2.std*strength,
                             med2.data < med2.median - med2.std*strength), med2.data, copy=False)
+
+    # med_mask = np.ma.masked_where(np.logical_or(med1.data > med1.median + med1.std*strength,
+    #                         med1.data < med1.median - med1.std*strength), med1.data, copy=False)
+    #
+    # MAD_mask = np.ma.masked_where(np.logical_or(mad.data > MAD_mean + MAD_std*strength,
+    #                         mad.data < MAD_mean - MAD_std*strength), mad.data, copy=False)
+    # med_mask = np.ma.masked_where(np.logical_or(med2.data > med_mean + med_std*strength,
+    #                         med2.data < med_mean - med_std*strength), med2.data, copy=False)
 
     mask = np.any((med_mask.mask, MAD_mask.mask), axis=0)
 
@@ -184,14 +192,17 @@ def make_mask(mad, med1, med2, strength):
     masked = mask.sum()
     print("{} columns masked".format(masked))
 
-    ###Mask column if adjacent to two masked columns
-    for i in range(len(mask)-1):
-        if (mask[i-1] and mask[i+1]):
-            mask[i] = True
+    ###Mask if within two columns of masked column on both sides
+    while True:
+        hit = False
+        for i in range(len(mask)):
+            if not mask[i]:
+                if (mask[i-1] or mask[i-2]) and (mask[i+1] or mask[i+2]):
+                    mask[i] = True
+                    hit = True
+        if not hit:
+            break
 
-    for j in range(len(mask)-1):
-        if (mask[j-2] and mask[j+2]):
-            mask[j] = True
 
 
     masked = mask.sum()
@@ -260,32 +271,33 @@ def main():
     args = parser.parse_args()
 
     stacked, sums, dc, noiseADU, cal, id, noise = stack_imgs(args.files, n_amps=1)
-    pix_vals, median, MAD, med_over_sum = projection_x(stacked, sums, args.gain)
-    plot(dc)
+    pix_vals, median, MAD, med_over_sum = projection_x(stacked, sums, args.gain, min_col=2100)
+    print(med_over_sum.median)
+    print(med_over_sum.std)
+
+    #plot(dc)
     #plot(noise)
     #plot(cal)
     #plot(med_over_sum)
     #ROOThist(pix_vals, bin_sz=0.01,lam=0.001,norm=pix_vals.data.size,noise=0.16,mean=0)
-    cmask = mask_clusters(stacked.T, threshold=5, radius=1, cti=3)
-    print(cmask)
-    print(cmask.shape)
+    cmask = mask_clusters(stacked.T, threshold=5, radius=1, cti=1)
+
 
     #MAD_std, MAD_med = ROOThist(MAD, 0.001, 0.1, norm=MAD.data.size,noise=0.16,mean=0)
-    #med_std, med_med = ROOThist(median, 0.001, 0, norm=median.data.size,noise=0.16,mean=0)
-    #med_sum_std, med_sum_med = ROOThist(med_over_sum, 0.1, 0, norm=median.data.size,noise=0.16,mean=0)
+    #med_std, med_med = ROOThist(med_over_sum, 0.001, 0, norm=med_over_sum.data.size,noise=0.16,mean=0)
 
-    sig_mask = 2
-    #mask = make_mask(median, MAD, MAD_std, MAD_mean, med_std, med_mean)
+    #med_sum_std, med_sum_med = ROOThist(med_over_sum, 0.1, 0, norm=median.data.size,noise=0.16,mean=0)
+    sig_mask = 3
+    #mask = make_mask(MAD, median, med_over_sum, sig_mask, MAD_std, MAD_med, med_std, med_med)
     mask = make_mask(MAD, median, med_over_sum, sig_mask)
 
 
     expand_mask = np.tile(mask,stacked.shape[1]).reshape(stacked.T.shape)
 
-    print(stacked.shape)
-    print(expand_mask.shape)
+
     pix_vals_masked = np.ma.masked_array(stacked.T, mask=expand_mask)
     clusters_masked = np.ma.masked_array(pix_vals_masked, mask=cmask)
-    print(expand_mask)
+    #print(expand_mask)
 
 
     masked = NamedArray("masked spectrum ({}#sigma)".format(sig_mask), pix_vals_masked.flatten(),
@@ -293,7 +305,7 @@ def main():
 
     cmasked = NamedArray("masked spectrum ({}#sigma)".format(sig_mask), clusters_masked.flatten(),
                             np.median(clusters_masked), np.std(clusters_masked))
-    ROOThist(cmasked, bin_sz=0.01,lam=0.001,norm=cmasked.data.size,noise=0.16,mean=0)
+    ROOThist(cmasked, bin_sz=0.01,lam=0.001,norm=cmasked.data.size,mean=0,noise=0.16)
 
 
 if __name__ == '__main__':
