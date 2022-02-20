@@ -21,7 +21,7 @@ NamedArray = namedtuple("NamedArray", "name data median std")
 ImageInfo = namedtuple("ImageInfo", "name data")
 
 
-###Stack imgs by row
+###Stack imgs row-wise
 def stack_imgs(fitsfiles, n_amps):
 
     shape = None
@@ -38,29 +38,23 @@ def stack_imgs(fitsfiles, n_amps):
             #hdulist.info()
             header = hdulist[0].header
             data = hdulist[0].data
-        rows = int(header["NROW"])
-        skips = int(header["NSAMP"])
-        # cols = int(header["NCOL"]) // skips
-        # dc = float(header["LAMBDA"])
-        # noise = float(header["NOISE"])
-        # cc = float(header["CAL"])
-        # id = int(header["RUNID"])
+        #rows = int(header["NROW"])
+        #skips = int(header["NSAMP"])
+        #cols = int(header["NCOL"]) // skips
         cal.data.append(float(header["CAL"]))
         noiseADU.data.append(float(header["NOISE"]))
         dc.data.append(float(header["LAMBDA"]))
         id.data.append(int(header["RUNID"]))
         noise.data.append(float(header["NOISE"])/float(header["CAL"]))
-        # rows = int(header["NAXIS2"])
-        # skips = int(header["NDCMS"])
-        # cols = int(header["NAXIS1"]) // skips
+
         if n_amps == 2:
             data = np.split(data, 2, axis=1)
-        else:
-            data = np.array(data)
-            data = np.flip(data.T, axis=1)
 
-            ###sum over rows to get total e per col
-            sum = np.sum(data, axis=1)
+        data = np.array(data)
+        data = np.flip(data.T, axis=1)
+
+        ###get total electrons per column
+        sum = np.sum(data, axis=1)
 
         #print(data.shape)
         if i==0:
@@ -76,7 +70,7 @@ def stack_imgs(fitsfiles, n_amps):
     return stacked_imgs, stacked_sum, dc, noiseADU, cal, id, noise  #2D arrays of stacked images and stacked sum over cols
 
 
-###Calculate 1-D projections (median, med_over_sum, MAD)
+###Calculate 1-D projections: median, med_over_sum, MAD
 def projection_x(stacked, sums, gain, min_col, max_col):
 
     calibrated = stacked / gain
@@ -87,7 +81,7 @@ def projection_x(stacked, sums, gain, min_col, max_col):
     #e_tot = NamedArray("e_tot", np.sum(calibrated, axis = 1))
     pix_vals = NamedArray("pix_vals", calibrated.flatten(),
                        np.median(calibrated), np.std(calibrated))
-    ###med1 is a simle median over all pixels in col over all imgs
+    ###med1 is a simple median over all pixels in col over all imgs
     med1 = np.median(calibrated, axis = 1)
     median = NamedArray("median", med1, np.median(med1[min_col:max_col]), np.std(med1[min_col:max_col]))
     mad = stats.median_abs_deviation(calibrated, axis = 1)
@@ -95,7 +89,6 @@ def projection_x(stacked, sums, gain, min_col, max_col):
     ###med2 takes the sum of electrons in col per image and then takes median
     med2 = np.median(sums, axis = 0)
     med_over_sum = NamedArray("median", med2, np.median(med2[min_col:max_col]), np.std(med2[min_col:max_col]))
-
 
     return (pix_vals, median, MAD, med_over_sum)
 
@@ -139,7 +132,7 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
     #func = ROOT.TF1("func", "[0]*TMath::Poisson(x*[2],[1])", -10, 100)
     func = []
 
-    for i in range(3):
+    for i in range(4):
         func.append("[0]*TMath::Poisson({0},[1])*TMath::Gaus(x,{0}+[2],[3],1)".format(i))
 
     f = ROOT.TF1("poiss_gauss", " + ".join(func))
@@ -170,12 +163,13 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
 
 
 ###Generate mask
-def make_mask(mad, med1, med2, strength):
+def make_mask(mad, med1, med2, strength, radius):
 
 
     MAD_mask = np.ma.masked_where(mad.data > mad.median + mad.std*strength, mad.data, copy=False)
     #med_mask = np.ma.masked_where(med2.data > med2.median + med2.std*strength, med2.data, copy=False)
     med_mask = np.ma.masked_where(med1.data > med1.median + med1.std*strength, med1.data, copy=False)
+
 
 
     # med_mask = np.ma.masked_where(np.logical_or(med1.data > med1.median + med1.std*strength,
@@ -193,16 +187,58 @@ def make_mask(mad, med1, med2, strength):
     masked = mask.sum()
     print("{} columns masked".format(masked))
 
-    ###Mask if within three columns of masked column on both sides
+    ###Mask if within radius columns of masked column on both sides
     while True:
         hit = False
-        for i in range(len(mask)-3):
+        for i in range(radius, len(mask)-radius):
             if not mask[i]:
-                if (mask[i-1] or mask[i-2] or mask[i-3]) and (mask[i+1] or mask[i+2] or mask[i+3]):
-                    mask[i] = True
-                    hit = True
+                for j in range(radius):
+                    if mask[i-j]:
+                        for k in range(radius):
+                            if mask[i+k]:
+                                mask[i] = True
+                                hit = True
+                                break
+            #if (mask[i-1] or mask[i-2] or mask[i-3] or mask[i-4] or mask[i-5]) and (mask[i+1] or mask[i+2] or mask[i+3] or mask[i+4] or mask[i+5]):
+                #mask[i] = True
         if not hit:
             break
+
+##########U2
+    # for i in range(1500):
+    #     mask[i] = True
+    # mask[1012:1018] = True
+    # mask[1138:1142] = True
+    # mask[1730:1740] = True
+############
+
+##########U1
+    # for i in range(600):
+    #     mask[i] = True
+    # mask[885:900] = True
+    # #mask[1020:1030] = True
+    # mask[1360:1400] = True
+    # mask[1540:1560] = True
+    # mask[2270:2300] = True
+    # mask[2795:2810] = True
+############
+
+##########L1
+    # mask[0:10] = True
+    # mask[1450:1490] = True
+    # mask[1770:1815] = True
+    # mask[1940:2035] = True
+    # mask[2856:2965] = True
+    # mask[2170:2190] = True
+############
+
+##########L2
+    # mask[1450:1480] = True
+    # mask[1780:1810] = True
+    # mask[1945:2035] = True
+    # mask[2856:1980] = True
+    # mask[2900:2950] = True
+############
 
 
 
@@ -224,7 +260,7 @@ def make_mask(mad, med1, med2, strength):
     ax3.plot(mad.data, "b+", label=mad.name, markersize=1 )
     ylab = mad.name + " (e)"
     ax3.set_ylabel(ylab)
-    plt.title("{} columns masked  --  {} sigma cut".format(masked,strength))
+    plt.title("{} columns masked".format(masked))
     plt.legend()
     plt.show()
     return mask
@@ -232,7 +268,9 @@ def make_mask(mad, med1, med2, strength):
 ###Mask clusters -- masks all pixels above threshold and all leading pixels
 ###within radius and all trailing pixels within radius + cti
 def mask_clusters(data, threshold, radius, cti):
+    print(data.shape)
     cols = data.shape[0]
+    print(cols)
     rows = data.shape[1]
     mask = np.zeros((cols, rows),dtype = bool)
     for i in range(cols):
@@ -240,22 +278,21 @@ def mask_clusters(data, threshold, radius, cti):
             if(data[i,j] >= threshold):
                 if(i < radius):  #pixel column is within radius of the left edge
                     if(j < radius):  #pixel row is within radius of the bottom
-                        mask[:(i+radius+cti),:(j+radius+cti)] = True  #mask radius + 1 above and to the right of pixel
-
+                        mask[:(i+radius+cti),:(j+radius+cti)] = True  #mask radius + cti above and to the right of pixel
                     elif((rows - j) <= radius):  #pixel column is within radius from the right edge
-                        mask[:(i+radius+cti),(j-radius):] = True  #mask radius + 1 above pixel row and radius to the left of edge
+                        mask[:(i+radius+cti),(j-radius):] = True  #mask radius + cti above pixel row and radius to the left of edge
                     else:
-                        mask[:(i+radius+cti),(j-radius):(j+radius+cti)] = True #mask radius + 1 to right of left edge and between radius leading  and radius+1 trailing of row
+                        mask[:(i+radius+cti),(j-radius):(j+radius+cti)] = True #mask radius + cti to right of left edge and between radius leading and radius+ cti trailing of row
                 elif((cols - i) <= radius):  #pix col is within radius of right edge
                     if(j < radius):  #pix row within radius of bottom
-                        mask[(i-radius):,:(j+radius+cti)] = True #mask radius away from right edge and radius + 1 from bottom
+                        mask[(i-radius):,:(j+radius+cti)] = True #mask radius away from right edge and radius + cti from bottom
                     elif((rows - j) <= radius): #pix within radius of top
                         mask[(i-radius):,(j-radius):] = True  #mask radius to left of pix and radius below
                     else:
-                        mask[(i-radius):,(j-radius):(j+radius+cti)] = True #mask radius to left and radius below and radius +1 above
+                        mask[(i-radius):,(j-radius):(j+radius+cti)] = True #mask radius to left and radius below and radius + cti above
                 else:
                     if(j < radius): #pixel is within radius of bottom
-                        mask[(i-radius):(i+radius+cti),:(j+radius+cti)] = True  #mask radius to left and radius +1 to right and radius + 1 above
+                        mask[(i-radius):(i+radius+cti),:(j+radius+cti)] = True  #mask radius to left and radius +cti to right and radius + cti above
                     elif((rows - j) <= radius): #pix within radius of top
                         mask[(i-radius):(i+radius+cti),(j-radius):] = True
                     else:
@@ -272,41 +309,34 @@ def main():
     args = parser.parse_args()
 
     stacked, sums, dc, noiseADU, cal, id, noise = stack_imgs(args.files, n_amps=1)
-    pix_vals, median, MAD, med_over_sum = projection_x(stacked, sums, args.gain, min_col=2000, max_col=-1)
-    print(med_over_sum.median)
-    print(med_over_sum.std)
+    pix_vals, median, MAD, med_over_sum = projection_x(stacked, sums, args.gain, min_col=1500, max_col=3000)
 
-    plot(dc)
-    plot(noise)
-    plot(cal)
+    # plot(dc)
+    # plot(noise)
+    # plot(cal)
     #plot(med_over_sum)
     #ROOThist(pix_vals, bin_sz=0.01,lam=0.001,norm=pix_vals.data.size,noise=0.16,mean=0)
-    cmask = mask_clusters(stacked.T, threshold=5, radius=5, cti=5)
-
+    cmask = mask_clusters(stacked, threshold=4, radius=5, cti=5)
 
     #MAD_std, MAD_med = ROOThist(MAD, 0.001, 0.1, norm=MAD.data.size,noise=0.16,mean=0)
     #med_std, med_med = ROOThist(med_over_sum, 0.001, 0, norm=med_over_sum.data.size,noise=0.16,mean=0)
     #med_sum_std, med_sum_med = ROOThist(med_over_sum, 0.1, 0, norm=median.data.size,noise=0.16,mean=0)
-
-    sig_mask = 3
     #mask = make_mask(MAD, median, med_over_sum, sig_mask, MAD_std, MAD_med, med_std, med_med)
-    mask = make_mask(MAD, median, med_over_sum, sig_mask)
+    mask = make_mask(MAD, median, med_over_sum, strength=2, radius=5)
 
 
     expand_mask = np.tile(mask,stacked.shape[1]).reshape(stacked.T.shape)
-
-
     pix_vals_masked = np.ma.masked_array(stacked.T, mask=expand_mask)
-    clusters_masked = np.ma.masked_array(pix_vals_masked, mask=cmask)
+    clusters_masked = np.ma.masked_array(pix_vals_masked, mask=cmask.T)
+    print("pixels masked as clusters = {}".format(cmask.sum()))
 
-
-    # with open('U2_mask_02_18.npy', 'wb') as f:
+    # with open('U2_mask_1510cols.npy', 'wb') as f:
     #    np.save(f, mask)
 
-    masked = NamedArray("masked spectrum ({}#sigma)".format(sig_mask), pix_vals_masked.flatten(),
+    masked = NamedArray("masked spectrum", pix_vals_masked.flatten(),
                             np.median(pix_vals_masked), np.std(pix_vals_masked))
 
-    cmasked = NamedArray("masked spectrum ({}#sigma)".format(sig_mask), clusters_masked.flatten(),
+    cmasked = NamedArray("masked spectrum", clusters_masked.flatten(),
                             np.median(clusters_masked), np.std(clusters_masked))
     ROOThist(cmasked, bin_sz=0.01,lam=0.001,norm=cmasked.data.size,mean=0,noise=0.16)
 
