@@ -144,7 +144,6 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
     s = s*bin_sz
 
     for i in data.data:
-    #for i in s:
         hist.Fill(i)
 
     """
@@ -153,8 +152,6 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
     [1]  lambda of poisson
     [2]  gauss mean offset
     [3]  pix noise (sigma of gauss)
-
-
     """
 
     #poiss = ROOT.TF1("poiss", "[0]*TMath::Poisson(x*[2],[1])", 0, 3)
@@ -170,11 +167,13 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
     f.SetParNames("norm","#lambda","#mu","#sigma")
     f.SetParameters(norm, lam, mean, noise)
 
+
     hist.GetXaxis().SetTitle("{} (e)".format(data.name))
     hist.GetYaxis().SetTitle("Count")
 
     #hist.Fit(poiss)
-    hist.Fit(f)
+    hist.Fit(f, "LSEM")
+    hist.Sumw2()
     hist.Draw()
 
     std = hist.GetStdDev()
@@ -190,7 +189,7 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
 
 
 ###Generate mask
-def make_mask(mad, med1, med2, strength, radius, savemask=False):
+def make_mask(mad, med1, med2, strength, radius, id, savemask=False):
 
 
     MAD_mask = np.ma.masked_where(mad.data > mad.median + mad.std*strength, mad.data, copy=False)
@@ -231,6 +230,14 @@ def make_mask(mad, med1, med2, strength, radius, savemask=False):
         if not hit:
             break
 
+    ###Unmask isolated masked columns
+    for i in range(1, len(mask)-1):
+        if mask[i]:
+            if not mask[i-1] and not mask[i+1]:
+                mask[i] = False
+
+
+    mask[0:10] = True
 ##########U2
     # for i in range(1500):
     #     mask[i] = True
@@ -249,12 +256,13 @@ def make_mask(mad, med1, med2, strength, radius, savemask=False):
 ###########
 
 # ##########L1
-#     mask[0:100] = True
-#     mask[1450:1490] = True
-#     mask[1770:1815] = True
-#     mask[1940:2040] = True
-#     mask[2856:2965] = True
-#     mask[2170:2190] = True
+    # mask[0:100] = True
+    # mask[1450:1490] = True
+    # mask[1770:1815] = True
+    # mask[1940:2040] = True
+    # mask[2856:2965] = True
+    # mask[2030:2050] = True
+    # mask[2160:2191] = True
 ############
 
 ##########L2
@@ -289,7 +297,7 @@ def make_mask(mad, med1, med2, strength, radius, savemask=False):
     ax3.plot(mad.data, "b+", label=mad.name, markersize=1 )
     ylab = mad.name + " (e)"
     ax3.set_ylabel(ylab)
-    plt.title("{} columns masked".format(masked))
+    plt.title("{} columns masked \n RUNID: {} - {}".format(masked,min(id.data), max(id.data)))
     plt.legend()
     plt.show()
     return mask
@@ -329,7 +337,7 @@ def mask_clusters(data, threshold, radius, cti):
     return mask
 
 ###Fit masked pixels, with clusters masked, to poisson-gauss distribution
-def fit_masked(mask, stacked, cmask):
+def fit_masked(mask, stacked, cmask, id):
 
     ###Expand mask to 2D
     expand_mask = np.tile(mask,stacked.shape[1]).reshape(stacked.T.shape)
@@ -341,13 +349,16 @@ def fit_masked(mask, stacked, cmask):
     clusters_masked = np.ma.masked_array(pix_vals_masked, mask=cmask.T)
     print("pixels masked as clusters = {}".format(cmask.sum()))
 
-    masked = NamedArray("masked spectrum", pix_vals_masked.flatten(),
+    masked = NamedArray("masked spectrum  RUNID {} - {}".format(min(id.data), max(id.data)), pix_vals_masked.flatten(),
                         np.median(pix_vals_masked), np.std(pix_vals_masked))
-    cmasked = NamedArray("masked spectrum", clusters_masked.flatten(),
+    cmasked = NamedArray("masked spectrum  RUNID {} - {}".format(min(id.data), max(id.data)), clusters_masked.flatten(),
                         np.median(clusters_masked), np.std(clusters_masked))
+
+
 
     ###Fit masked pixels to poiss-gauss
     ROOThist(cmasked, bin_sz=0.01,lam=0.001,norm=cmasked.data.size,mean=0,noise=0.16)
+    #ROOThist(cmasked, bin_sz=0.01,lam=0.001,norm=1,mean=0,noise=0.16)
     return
 
 
@@ -361,23 +372,27 @@ def main():
 
     stacked, sums, dc, noiseADU, cal, id, noise = stack_imgs(args.files, n_amps=1)
     pix_vals, median, MAD, med_over_sum = projection_x(stacked, sums, args.gain, min_col=200, max_col=1400, runid=id)
-    saveROOT(median, med_over_sum, id)
+    #saveROOT(median, med_over_sum, id)
 
-    # plot(dc, id)
+    plot(dc, id)
     # plot(noise, id)
     # plot(cal, id)
 
     #ROOThist(pix_vals, bin_sz=0.1,lam=0.1,norm=pix_vals.data.size,noise=0.16,mean=0)
-    cmask = mask_clusters(stacked, threshold=4, radius=5, cti=5)
+    cmask = mask_clusters(stacked, threshold=20, radius=1, cti=50)
 
     #MAD_std, MAD_med = ROOThist(MAD, 0.001, 0.1, norm=MAD.data.size,noise=0.16,mean=0)
     #med_std, med_med = ROOThist(med_over_sum, 0.001, 0, norm=med_over_sum.data.size,noise=0.16,mean=0)
     #med_sum_std, med_sum_med = ROOThist(med_over_sum, 0.1, 0, norm=median.data.size,noise=0.16,mean=0)
 
-    #mask = make_mask(MAD, median, med_over_sum, strength=3, radius=5, savemask=False)
-    mask = np.load("../mask_RUN_ID_040-047/L2/L2_mask_325cols.npy")
+    mask = make_mask(MAD, median, med_over_sum, strength=2.5, radius=5, id=id, savemask=False)
+    L2 = "../mask_RUN_ID_040-047/L2/L2_mask_325cols.npy"
+    L1 = "../mask_RUN_ID_040-047/L1/L1_mask_386cols.npy"
+    U2 = "../mask_RUN_ID_040-047/U2/U2_mask_1510cols.npy"
+    U1 = "../mask_RUN_ID_040-047/U1/U1_mask_720cols.npy"
+    #mask = np.load(L1)
 
-    fit_masked(mask, stacked, cmask)
+    fit_masked(mask, stacked, cmask, id)
 
 
 
