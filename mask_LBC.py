@@ -18,9 +18,10 @@ from collections import namedtuple
 import re
 
 
-CCDData = namedtuple("CCDData", "name data median std")
-HeaderInfo = namedtuple("HeaderInfo", "name dataL dataU")
-ImgInfo = namedtuple("ImgInfo", "name data ccd amp")
+CCDData = namedtuple("CCDData", "name data median mad")
+PreProc = namedtuple("PreProc", "name data")
+ImgInfo = namedtuple("ImgInfo", "name data ccd amp rows")
+
 
 ###Stack imgs row-wise
 def stack_imgs(fitsfiles, n_amps):
@@ -28,42 +29,36 @@ def stack_imgs(fitsfiles, n_amps):
     shape = None
     stacked_imgs = None
     stacked_sum = None
-    cal = HeaderInfo("cal", [], [])
-    dc = HeaderInfo("dc", [], [])
-    noiseADU = HeaderInfo("noiseADU", [], [])
-    #noise = ImgInfo("noise", [], [])
-    id = []
+    cal = PreProc("cal", [])
+    dc = PreProc("dc", [])
+    noiseADU = PreProc("noiseADU", [])
+    noise = PreProc("noise", [])
+
 
     for i in range(len(fitsfiles)):
+
         with fits.open(fitsfiles[i]) as hdulist:
             #hdulist.info()
             header = hdulist[0].header
-            data = hdulist[1].data
-        cal.dataL.append(float(header["MEGAINL"]))
-        cal.dataU.append(float(header["MEGAINU"]))
-        noiseADU.dataL.append(float(header["MESIGL"]))
-        noiseADU.dataU.append(float(header["MESIGU"]))
-        dc.dataL.append(float(header["MEDCL"]))
-        dc.dataU.append(float(header["MEDCU"]))
+            data = hdulist[0].data
+        cal.data.append(float(header["CAL"]))
+        noiseADU.data.append(float(header["NOISE"]))
+        dc.data.append(float(header["LAMBDA"]))
+        noise.data.append(float(header["NOISE"])/float(header["CAL"]))
+        amp = header["AMP"]
+        ccd = "6415"
+        rows = header["NAXIS2"]
 
-
-
+        data = np.array(data)
+        #data = np.flip(data.T, axis=1)
+        sum =  np.sum(data, axis=0)
         ###get total electrons per column
-        sum = np.sum(data, axis=1)
-
-        if n_amps == 2:
-            data = np.split(data, 2, axis=1)
-            dataL = data[0]/float(header["MEGAINL"])
-            dataU = data[1]/float(header["MEGAINU"])
-            amp = "L"
-            if amp == "L":
-                data = dataL
-            else:
-                data = dataU
-
+        #sum = np.sum(data, axis=1)
+        #print("sum dimensions={}".format(sum.shape))
+        #print(data.shape)
         if i==0:
-            runids = re.findall("_(\d+)_ped", ''.join(fitsfiles))
-            id = ImgInfo("runid", [int(runids[i])], "6415", amp)
+            runids = re.findall("_(\d+)_{}".format(amp), ''.join(fitsfiles))
+            id = ImgInfo("runid", [int(runids[i])], ccd, amp, rows)
             shape = data.shape
             stacked_imgs = data
             stacked_sum = sum
@@ -73,9 +68,14 @@ def stack_imgs(fitsfiles, n_amps):
             id.data.append(int(runids[i]))
             stacked_imgs = np.vstack((stacked_imgs, data))
             stacked_sum = np.vstack((stacked_sum, sum))
+    print(id.data)
+    if amp == "U":
+        stacked_imgs = np.flip(stacked_imgs, axis=1)
+        stacked_sum = np.flip(stacked_sum, axis=1)
+    #stacked_imgs = np.flip(stacked_imgs, axis=0)
 
 
-    return stacked_imgs, stacked_sum, dc, noiseADU, cal, id   #2D arrays of stacked images and stacked sum over cols
+    return stacked_imgs, stacked_sum, dc, noiseADU, cal, id, noise  #2D arrays of stacked images and stacked sum over cols
 
 
 ###Calculate 1-D projections: median, med_over_sum, MAD
@@ -85,58 +85,59 @@ def projection_x(stacked, sums, gain, min_col, max_col, runid):
 
     ###Uncomment to flip ADU polarity
     #calibrated = np.amax(calibrated) - calibrated
+    print("stacked = {}".format(stacked.shape))
+    print("sums = {}".format(sums.shape))
 
     pix_vals = CCDData("pix_vals", calibrated.flatten(),
-                       np.median(calibrated), np.std(calibrated))
+                       np.median(calibrated), stats.median_abs_deviation(calibrated))
 
     ###med1 is a simple median over all pixels in col over all imgs
-    med1 = np.median(calibrated, axis = 1)
-    median = CCDData("median", med1, np.median(med1[min_col:max_col]), np.std(med1[min_col:max_col]))
+    med1 = np.median(calibrated, axis = 0)
+    median = CCDData("median", med1, np.median(med1[min_col:max_col]), stats.median_abs_deviation(med1[min_col:max_col]))
 
-    mad = stats.median_abs_deviation(calibrated, axis = 1)
-    MAD = CCDData("MAD", mad, np.median(mad[min_col:max_col]), np.std(mad[min_col:max_col]))
+    mad = stats.median_abs_deviation(calibrated, axis = 0)
+    MAD = CCDData("MAD", mad, np.median(mad[min_col:max_col]), stats.median_abs_deviation(mad[min_col:max_col]))
 
     ###med2 takes the sum of electrons in col per image and then takes median
     med2 = np.median(sums, axis = 0)
-    med_over_sum = CCDData("median", med2, np.median(med2), np.std(med2))
+    med_over_sum = CCDData("median", med2, [], [])
+    #med_over_sum = CCDData("median", med2, np.median(med2[min_col:max_col]), stats.median_abs_deviation(med2[min_col:max_col]))
 
     return (pix_vals, median, MAD, med_over_sum)
 
-###Save medians to ROOT files
-def saveROOT(med1, med2, id):
+###Save to ROOT file signed medians as 1-D histos
+def saveROOT(med1, med2, id, mask):
 
-    title = "medians_RUNID{}-{}".format(min(id.data),max(id.data))
-    h = ROOT.TH1F("h",title, 3100, 1, 3100)
-    for i in range(3100):
-        h.Fill(i+1, med1.data[i])
-    medians = ROOT.TFile(title, "RECREATE")
-    h.Draw()
-    h.Write()
-    medians.Close()
-    h.Reset()
+    title = "{}{}_masked_meds_RUNID{}-{}.root".format(id.ccd, id.amp, min(id.data),max(id.data))
 
-    title = "medians_of_sums_RUNID{}-{}".format(min(id.data),max(id.data))
-    h = ROOT.TH1F("h",title, 3100, 1, 3100)
-    for i in range(3100):
-        h.Fill(i+1, med2.data[i])
-    meds_of_sums = ROOT.TFile(title, "RECREATE")
-    h.Draw()
-    h.Write()
-    meds_of_sums.Close()
-    h.Reset()
+    f = ROOT.TFile(title, "RECREATE");
+
+    h1 = ROOT.TH1D("h1","medians", len(med1.data), 1, len(med1.data))
+
+    h2 = ROOT.TH1D("h2","median sum/no. img rows", len(med2.data), 1, len(med2.data))
+    ###If column i is masked, make median negative
+    for i in range(len(med1.data)):
+        if mask[i]:
+            h1.Fill(i+1, -abs(med1.data[i]))
+            h2.Fill(i+1, -abs(med2.data[i]/id.rows))   ###We want median sum/no. of rows in an img
+            #h2.Fill(i+1, -abs(med2.data[i]))
+        else:
+            h1.Fill(i+1, abs(med1.data[i]))
+            h2.Fill(i+1, abs(med2.data[i]/id.rows))    ###We want median sum/no. of rows in an img
+            #h2.Fill(i+1, abs(med2.data[i]))
+
+    h1.Draw()
+    h1.Write()
+    h2.Write()
+    f.Close()
+
     return
 
 
-
-def plot(data, id, amp):
+def plot(data, id):
     fig, ax = plt.subplots(figsize=(10, 5.4))
-    if amp == "U":
-         ax.plot(id, data.dataU, "k.")
-    elif amp == "L":
-         ax.plot(id, data.dataL, "k.")
-    else:
-         raise AssertionError("invalid amplifier")
-    ax.set_xlabel("{}".format("RUNid"))
+    ax.plot(id.data, data.data, "k.")
+    ax.set_xlabel("{}".format(id.name))
     ax.set_ylabel("{}".format(data.name))
     plt.show()
     return
@@ -147,20 +148,18 @@ def plot_img(img):
     plt.figure(figsize=(9,11))
     #fig,ax1 = plt.subplots()
     #image=image[1:10,3200:-1]
-    plt.imshow(img,vmin=0,vmax=0.5,
-        aspect="auto",cmap="inferno")
-    #plt.imshow(img,vmin=np.mean(img)-0.2*np.std(img),vmax=np.mean(img)+0.2*np.std(img),
-#        aspect="auto",cmap="inferno")
-    #plt.imshow(image, aspect="auto",cmap="inferno")
-    plt.colorbar(label="ADU")
+    plt.imshow(img,vmin=-1,vmax=5,
+    #plt.imshow(img,vmin=np.mean(img)-0.5*np.std(img),vmax=np.mean(img)+0.5*np.std(img),
+         aspect="auto",cmap="inferno")
+    plt.ylim(0, img.shape[0])
+    #plt.imshow(img, aspect="auto",cmap="inferno")
+    plt.colorbar(label="e")
     plt.show()
-
     return
 
 
-
 ###Plot histogram and fit using ROOT
-def ROOThist(data, bin_sz, lam, norm, noise, mean):
+def ROOThist(data, bin_sz, lam, norm, noise, mean, id):
 
     ROOT.gStyle.SetOptFit(1111)
     ROOT.gStyle.SetOptStat(0)
@@ -168,13 +167,12 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
 
     n_bins = (np.amax(data.data)-np.amin(data.data))/bin_sz
 
-    title = data.name
+    title = "{}{} masked spectrum \n RUNID {} - {}".format(id.amp, id.ccd, min(id.data),max(id.data))
     hist = ROOT.TH1F("hist",title, int(n_bins), np.amin(data.data), np.amax(data.data))
     s = np.random.poisson(6,3100)
     s = s*bin_sz
 
     for i in data.data:
-    #for i in s:
         hist.Fill(i)
 
     """
@@ -190,7 +188,7 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
     #poiss.SetParameters(3100,12,1/bin_sz)
     func = []
 
-    for i in range(4):
+    for i in range(3):
         func.append("[0]*TMath::Poisson({0},[1])*TMath::Gaus(x,{0}+[2],[3],1)".format(i))
 
     f = ROOT.TF1("poiss_gauss", " + ".join(func))
@@ -198,11 +196,13 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
     f.SetParNames("norm","#lambda","#mu","#sigma")
     f.SetParameters(norm, lam, mean, noise)
 
+
     hist.GetXaxis().SetTitle("{} (e)".format(data.name))
     hist.GetYaxis().SetTitle("Count")
-
+    #hist.GetYaxis().SetRangeUser(0, 1000000)
     #hist.Fit(poiss)
-    hist.Fit(f, "S L")  ###Use log likelihood method and print results of hte fit
+    hist.Fit(f, "LSEM")
+    hist.Sumw2()
     hist.Draw()
 
     std = hist.GetStdDev()
@@ -221,25 +221,23 @@ def ROOThist(data, bin_sz, lam, norm, noise, mean):
 def make_mask(mad, med1, med2, strength, radius, id, savemask=False):
 
 
-    #MAD_mask = np.ma.masked_where(mad.data > mad.median + mad.std*strength, mad.data, copy=False)
-    #med_mask = np.ma.masked_where(med2.data > med2.median + med2.std*strength, med2.data, copy=False)
-    #med_mask = np.ma.masked_where(med1.data > med1.median + med1.std*strength, med1.data, copy=False)
+    #MAD_mask = np.ma.masked_where(mad.data > mad.median + mad.mad*strength, mad.data, copy=False)
+    #med_mask = np.ma.masked_where(med2.data > med2.median + med2.mad*strength, med2.data, copy=False)
+    #med_mask = np.ma.masked_where(med1.data > med1.median + med1.mad*strength, med1.data, copy=False)
 
-
-
-    med_mask = np.ma.masked_where(np.logical_or(med1.data > med1.median + med1.std*strength,
-                             med1.data < med1.median - med1.std*strength), med1.data, copy=False)
-    MAD_mask = np.ma.masked_where(np.logical_or(mad.data > mad.median + mad.std*strength,
-                             mad.data < mad.median - mad.std*strength), mad.data, copy=False)
-    # med_mask = np.ma.masked_where(np.logical_or(med2.data > med2.median + med2.std*strength,
-    #                          med2.data < med2.median - med2.std*strength), med2.data, copy=False)
+    #med_mask = np.ma.masked_where(np.logical_or(med1.data > med1.median + med1.mad*strength,
+    #                          med1.data < med1.median - med1.mad*strength), med1.data, copy=False)
+    MAD_mask = np.ma.masked_where(np.logical_or(mad.data > mad.median + mad.mad*strength,
+                             mad.data < mad.median - mad.mad*strength), mad.data, copy=False)
+    med_mask = np.ma.masked_where(np.logical_or(med2.data > med2.median + med2.mad*strength,
+                             med2.data < med2.median - med2.mad*strength), med2.data, copy=False)
 
 
     mask = np.any((med_mask.mask, MAD_mask.mask), axis=0)
     #mask = np.all((med_mask.mask, MAD_mask.mask), axis=0)
 
-
-    print("{} columns masked".format(mask.sum()))
+    masked = mask.sum()
+    print("{} columns masked".format(masked))
 
     ###Mask if within radius columns of masked column on both sides
     while True:
@@ -253,47 +251,72 @@ def make_mask(mad, med1, med2, strength, radius, id, savemask=False):
                                 mask[i] = True
                                 hit = True
                                 break
-            #if (mask[i-1] or mask[i-2] or mask[i-3] or mask[i-4] or mask[i-5]) and (mask[i+1] or mask[i+2] or mask[i+3] or mask[i+4] or mask[i+5]):
-                #mask[i] = True
         if not hit:
             break
 
+    ###Unmask isolated masked columns
+    #for i in range(1, len(mask)-1):
+    #    if mask[i]:
+    #        if not mask[i-1] and not mask[i+1]:
+    #            mask[i] = False
 
-    if savemask:
-        with open('mask_RUNID{}-{}.npy'.format(min(id.data),max(id.data)), 'wb') as f:
-            np.save(f, mask)
 
-    print("{} columns masked".format(mask.sum()))
+
+#########U
+    # mask[0:146] = True
+    # mask[310:321] = True
+    # mask[185:190] = True
+    # mask[200:203] = True
+###########
+
+# ##########L
+    mask[300:320] = True
+    mask[280:320] = True
+############
+
+    masked = mask.sum()
+    print("{} columns masked".format(masked))
 
 
     fig, ax1 = plt.subplots(figsize=(10, 5.4))
     ax1.set_xlabel("Column number")
-    ax1.plot(med1.data, "r+", label=med1.name, markersize=1)
+    ax1.plot(med2.data, "r+", label=med2.name, markersize=5)
+    ax1.set_ylim(0,50)
+    #ax1.set_ylim(min(med1.data),max(med1.data))
     #ax1.plot(med2.data, "r+", label=med2.name, markersize=1)
     ylab = med2.name + " (e)"
     ax1.set_ylabel(ylab)
+    #ax1.set_yscale("log")
+    ax1.legend(loc=2)
 
     ax2 = ax1.twinx()
     ax3 = ax1.twinx()
-
+    plt.legend()
     ax2.imshow(np.expand_dims(mask, axis=0), aspect="auto", cmap='binary', alpha=0.4 )
     ax2.get_yaxis().set_visible(False)
-    ax3.plot(mad.data, "b+", label=mad.name, markersize=1 )
+    ax3.set_ylim(0.1,0.2)
+    #ax3.set_ylim(min(mad.data),max(mad.data))
+    ax3.plot(mad.data, "bx", label=mad.name, markersize=5 )
+    #ax3.set_yscale("log")
+
     ylab = mad.name + " (e)"
     ax3.set_ylabel(ylab)
-    plt.title("{} columns masked \n RUNID: {} - {}".format(mask.sum(),min(id.data), max(id.data)))
+    plt.title(" {} {}  RUNID: {} - {}\n {} columns masked".format(id.ccd, id.amp,
+                                min(id.data), max(id.data), masked))
     plt.legend()
+    if savemask:
+        with open('{}{}_mask_RUNID{}-{}.npy'.format(id.amp, id.ccd, min(id.data),max(id.data)), 'wb') as f:
+            np.save(f, mask)
+        plt.savefig('{}{}_mask_RUNID{}-{}.png'.format(id.amp, id.ccd, min(id.data),max(id.data)))
+
     plt.show()
     return mask
 
 ###Mask clusters -- masks all pixels above threshold and all leading pixels
-###within radius and all trailing pixels within radius + cti
+###within radius and all trailing pixels within radius + vcti or hcti
 def mask_clusters(data, threshold, radius, vcti, hcti):
-    print(data.shape)
     cols = data.shape[0]
-    print(cols)
     rows = data.shape[1]
-
     mask = np.zeros((cols, rows),dtype = bool)
     for i in range(cols):
         for j in range(rows):
@@ -322,26 +345,26 @@ def mask_clusters(data, threshold, radius, vcti, hcti):
     return mask
 
 ###Fit masked pixels, with clusters masked, to poisson-gauss distribution
-def fit_masked(mask, stacked, cmask):
+def fit_masked(mask, stacked, cmask, id):
 
     ###Expand mask to 2D
-    expand_mask = np.tile(mask,stacked.shape[1]).reshape(stacked.T.shape)
+    expand_mask = np.tile(mask,stacked.shape[0]).reshape(stacked.shape)
 
     ###Apply mask to pixel array
-    pix_vals_masked = np.ma.masked_array(stacked.T, mask=expand_mask)
+    pix_vals_masked = np.ma.masked_array(stacked, mask=expand_mask)
 
     ###Mask clusters found from mask_clusters
-    clusters_masked = np.ma.masked_array(pix_vals_masked, mask=cmask.T)
+    clusters_masked = np.ma.masked_array(pix_vals_masked, mask=cmask)
     print("pixels masked as clusters = {}".format(cmask.sum()))
 
-    masked = CCDData("masked spectrum", pix_vals_masked.flatten(),
-                        np.median(pix_vals_masked), np.std(pix_vals_masked))
-    cmasked = CCDData("masked spectrum", clusters_masked.flatten(),
-                        np.median(clusters_masked), np.std(clusters_masked))
+    masked = CCDData("masked spectrum ", pix_vals_masked.flatten(),
+                        np.median(pix_vals_masked), stats.median_abs_deviation(pix_vals_masked))
+    cmasked = CCDData("masked spectrum ", clusters_masked.flatten(),
+                        np.median(clusters_masked), stats.median_abs_deviation(clusters_masked))
 
     ###Fit masked pixels to poiss-gauss
-    ROOThist(cmasked, bin_sz=0.01,lam=0.001,norm=cmasked.data.size,mean=0,noise=0.16)
-    return
+    ROOThist(cmasked, bin_sz=0.01,lam=0.01,norm=1300,mean=0,noise=0.19,id=id)
+    return clusters_masked
 
 
 def main():
@@ -352,25 +375,26 @@ def main():
     parser.add_argument('-g','--gain',metavar='CCD gain', type=float,default=1., help='e to electron conversion for single-e peaks fit')
     args = parser.parse_args()
 
-    stacked, sums, dc, noiseADU, cal, id = stack_imgs(args.files, n_amps=2)
-    pix_vals, median, MAD, med_over_sum = projection_x(stacked, sums, args.gain, min_col=0, max_col=310, runid=id)
-    #saveROOT(median, med_over_sum, id)
-
-    #plot(dc, id)
-    #plot(noiseADU, id)
-    #plot(cal, id)
-    plot_img(stacked)
-    #ROOThist(pix_vals, bin_sz=0.1,lam=0.1,norm=pix_vals.data.size,noise=0.16,mean=0)
-    cmask = mask_clusters(stacked, threshold=10, radius=2, vcti=80, hcti=5)
-    plot_img(cmask)
+    stacked, sums, dc, noiseADU, cal, id, noise = stack_imgs(args.files, n_amps=1)
+    pix_vals, median, MAD, med_over_sum = projection_x(stacked, sums, args.gain,
+                              min_col=150, max_col=250, runid=id)
 
 
-    mask = make_mask(MAD, median, med_over_sum, strength=3, radius=0, id=id, savemask=False)
-    #mask = np.load("mask_RUN_ID_040-047/L2/L2_mask_325cols.npy")
+    # plot(dc, id)
+    # plot(noise, id)
+    # plot(cal, id)
+    #plot_img(stacked)
+    ROOThist(pix_vals, bin_sz=0.1,lam=0.1,norm=pix_vals.data.size,noise=0.16,mean=0,id=id)
+    cmask = mask_clusters(stacked, threshold=10, radius=2, vcti=50, hcti=10)
 
-    fit_masked(mask, stacked, cmask)
+    #plot_img(cmask)
+    #mask = make_mask(MAD, median, med_over_sum, strength=7, radius=3, id=id, savemask=False)
+    U ="U6415_mask_RUNID480-725.npy"
+    L ="L6415_mask_RUNID480-725.npy"
+    mask = np.load(L)
 
-
-
+    #saveROOT(median, med_over_sum, id, mask)
+    CCD_masked = fit_masked(mask, stacked, cmask, id)
+    #plot_img(CCD_masked)
 if __name__ == '__main__':
     main()
