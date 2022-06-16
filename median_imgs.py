@@ -14,6 +14,7 @@ import numpy as np
 from astropy.io import fits
 import os.path
 from os import path
+import argparse
 import sys
 import matplotlib.pyplot as plt
 import time
@@ -23,10 +24,12 @@ import numpy.ma as ma
 
 ###Create array of the data from FITS file
 def get_data(fitsfiles):
-    for i in range(len(fitsfiles)):
+    for i in range(len(fitsfiles)): 
         hdulist = fits.open(fitsfiles[i])
         hdulist.info()
         fitsfiles[i] = hdulist[0].data
+        #if i == len(fitsfiles):
+        #    hdulist.close()
     fitsfiles = np.array(fitsfiles)
     hdulist.close()
     return fitsfiles #3d array
@@ -46,49 +49,52 @@ def flatten_files(fitsfiles):
 ###and median after omitting outliers and saves to .txt
 #########################################################
 def median_imgs(flatfiles, width, height):
+    print(flatfiles.shape)
     n_files, file_length = flatfiles.shape
 
     median_img = np.median(flatfiles, axis=0)
+    
     stddev = np.std(flatfiles,axis=0)
-    masked = np.ma.masked_where(np.logical_or(flatfiles<median_img-stddev,flatfiles>median_img+stddev),flatfiles,copy=True)
-    median_sans_outliers = np.ma.median(masked, axis=0)
+    masked = np.ma.masked_where(np.logical_or(flatfiles<median_img-stddev,flatfiles>median_img+stddev),flatfiles,copy=False)
+    #median_sans_outliers = np.ma.median(masked, axis=0)
 
     median_img = median_img.reshape(width, height)
-    median_sans_outliers = median_sans_outliers.reshape(width, height)
+    #median_sans_outliers = median_sans_outliers.reshape(width, height)
     
     np.savetxt('median_img.txt', median_img, delimiter=',')
-    np.savetxt('median_sans_outliers.txt', median_sans_outliers, delimiter=',')
+    #np.savetxt('median_sans_outliers.txt', median_sans_outliers, delimiter=',')
     return
 
 
 
 
 def main():
-    if len(sys.argv)<2:
+#    if len(sys.argv)<2:
+#
+#        print("Error: first argument must be a FITS file")
+#        exit(1)
+#
+#    if path.exists(sys.argv[1]):
+#        if sys.argv[1].endswith('.fits'):
+#            fitsfiles = glob("*.fits")
+#            print(fitsfiles)
+#        else:
+#            print("Enter a valid FITS file")
+#            exit(1)
 
-        print("Error: first argument must be a FITS file")
-        exit(1)
-
-    if path.exists(sys.argv[1]):
-        if sys.argv[1].endswith('.fits'):
-            fitsfiles = glob("*.fits")
-            print(fitsfiles)
-        else:
-            print("Enter a valid FITS file")
-            exit(1)
-
-    else:
-        print("Enter a valid FITS file")
-        exit(1)
+#    else:
+#        print("Enter a valid FITS file")
+#        exit(1)
+    parser = argparse.ArgumentParser(description='Generate median CCD img')
+    parser.add_argument('-f','--files', metavar='FILES', type=str, help='FITS files',required=True, nargs='*')
+    args = parser.parse_args()
 
 
     start_time = time.time()
 
-
-    data = get_data(fitsfiles)
+    data = get_data(args.files)
     flatfiles = flatten_files(data)
     n_files, width, height = data.shape
-
     median_imgs(flatfiles,width,height)
 
 
